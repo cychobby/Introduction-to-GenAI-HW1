@@ -3,9 +3,10 @@ import os
 import subprocess
 import sys
 from typing import Dict, Any, List, Union
+import requests
 from ddgs import DDGS
 
-# Tool definitions for OpenAI function calling
+# Tool definitions for OpenAI function calling and Fetch MCP support
 TOOLS = [
     {
         "type": "function",
@@ -71,6 +72,42 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "fetch",
+            "description": "Fetch the content from a URL and return the response text, headers, and status.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "The URL to fetch. Must begin with http:// or https://"
+                    },
+                    "method": {
+                        "type": "string",
+                        "enum": ["GET", "POST"],
+                        "description": "HTTP method to use for the request",
+                        "default": "GET"
+                    },
+                    "headers": {
+                        "type": "object",
+                        "description": "Optional HTTP headers to include in the request"
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": "Optional request body for POST requests"
+                    },
+                    "timeout": {
+                        "type": ["integer", "string"],
+                        "description": "Timeout in seconds for the fetch request",
+                        "default": 15
+                    }
+                },
+                "required": ["url"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "file_operations",
             "description": "Perform basic file operations (read, write, list directory)",
             "parameters": {
@@ -98,7 +135,7 @@ TOOLS = [
 
 class ToolExecutor:
     def __init__(self):
-        self.safe_paths = ["/tmp", "/home/daddywu/Python區/GenAI_class"]  # Define safe paths
+        self.safe_paths = ["/tmp", os.getcwd(), "/home/daddywu/Python區/GenAI_class"]  # Define safe paths
 
     def calculator(self, expression: str) -> str:
         """Safe calculator function"""
@@ -155,6 +192,36 @@ class ToolExecutor:
                 return output
         except Exception as e:
             return f"Error searching web for '{query}': {str(e)}. The system may not have internet access or the search service is unavailable."
+
+    def fetch(self, url: str, method: str = "GET", headers: Dict[str, Any] = None, body: str = "", timeout: Union[int, str] = 15) -> str:
+        """Fetch remote content via HTTP."""
+        try:
+            if isinstance(timeout, str):
+                timeout = int(timeout)
+
+            if not url.lower().startswith(("http://", "https://")):
+                return "Error: URL must start with http:// or https://"
+
+            response = requests.request(
+                method=method.upper(),
+                url=url,
+                headers=headers or {},
+                data=body if body else None,
+                timeout=timeout,
+                allow_redirects=True
+            )
+
+            response_text = response.text
+            if len(response_text) > 3000:
+                response_text = response_text[:3000] + "\n...[truncated]"
+
+            return (
+                f"Status: {response.status_code}\n"
+                f"Headers: {dict(response.headers)}\n"
+                f"Body:\n{response_text}"
+            )
+        except Exception as e:
+            return f"Error fetching URL {url}: {str(e)}"
 
     def execute_code(self, code: str, timeout: Union[int, str] = 30) -> str:
         """Execute Python code safely with scientific libraries"""

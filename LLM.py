@@ -11,6 +11,7 @@ import json
 from database import PersistenceManager
 from model_router import ModelRouter
 from multimodal import ImageProcessor
+from anthropic_mcp import ensure_mcp_server_running, run_anthropic_mcp
 from tools import ToolExecutor, get_tools_for_api
 from utilities import SessionAnalytics, SessionManager
 
@@ -39,6 +40,7 @@ def render_chat_content(content):
 load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
 st.set_page_config(page_title="Advanced GenAI Chat System v2.0", layout="wide")
 st.title("🚀 Advanced GenAI Chat System v2.0")
@@ -107,14 +109,19 @@ with st.sidebar:
     # Auto-routing toggle
     st.session_state.auto_routing = st.checkbox("啟用自動模型路由", value=st.session_state.auto_routing)
 
-    api_source = st.selectbox("API 來源", ["Groq", "NVIDIA NIM"])
+    api_source = st.selectbox("API 來源", ["Groq", "NVIDIA NIM", "Anthropic MCP"])
 
     if api_source == "Groq":
         current_key, base_url = GROQ_API_KEY, "https://api.groq.com/openai/v1"
         model_options = ["llama-3.3-70b-versatile", "meta-llama/llama-4-scout-17b-16e-instruct"]
-    else:
+    elif api_source == "NVIDIA NIM":
         current_key, base_url = NVIDIA_API_KEY, "https://integrate.api.nvidia.com/openai/v1"
         model_options = ["GPT-OSS-120b"]
+    else:
+        current_key, base_url = ANTHROPIC_API_KEY, None
+        model_options = ["claude-3.5", "claude-4"]
+        if not ANTHROPIC_API_KEY:
+            st.warning("請在環境變數中設定 ANTHROPIC_API_KEY 才能使用 Anthropic MCP")
 
     if st.session_state.auto_routing:
         model_name = st.selectbox("建議模型 (自動路由)", model_options, disabled=True)
@@ -124,6 +131,10 @@ with st.sidebar:
 
     use_streaming = st.checkbox("開啟串流輸出 (Streaming)", value=True)
     use_tools = st.checkbox("啟用工具調用 (Tools)", value=True)
+    if api_source == "Anthropic MCP" and use_streaming:
+        st.warning("Anthropic MCP 目前暫不支援串流輸出，已自動切換為非串流模式。")
+        use_streaming = False
+
     system_prompt = st.text_area("System Prompt", value="你是一個專業助理，可以使用各種工具來幫助用戶。當用戶要求搜尋資訊、執行計算、運行程式碼或操作檔案時，請積極使用相應的工具來提供準確的答案。")
     temperature = st.slider("Temperature (隨機性)", 0.0, 2.0, 0.7)
 
@@ -292,13 +303,6 @@ else:
         st.session_state.uploaded_image = None
 
         # Call API with tools
-        client = OpenAI(api_key=current_key, base_url=base_url)
-
-        # Ensure model_name is valid for current API source
-        if model_name not in model_options:
-            model_name = model_options[0]
-            st.warning(f"模型 {model_name} 在當前 API 中不可用，已切換至 {model_name}")
-
         full_history = [{"role": "system", "content": system_prompt}] + messages
 
         with st.chat_message("assistant"):
@@ -306,117 +310,138 @@ else:
             full_res = ""
 
             try:
-                # Prepare API call
-                api_params = {
-                    "model": model_name,
-                    "messages": full_history,
-                    "temperature": temperature,
-                    "stream": use_streaming
-                }
+                if api_source == "Anthropic MCP":
+                    if model_name not in model_options:
+                        model_name = model_options[0]
+                        st.warning(f"模型 {model_name} 在當前 API 中不可用，已切換至 {model_name}")
 
-                if use_tools:
-                    api_params["tools"] = get_tools_for_api()
-                    api_params["tool_choice"] = "auto"
-
-                response = client.chat.completions.create(**api_params)
-
-                # Handle tool calls
-                tool_calls_accumulated = []
-                if use_tools and use_streaming:
-                    # In streaming mode, accumulate tool calls
-                    for chunk in response:
-                        if hasattr(chunk, 'choices') and chunk.choices and len(chunk.choices) > 0:
-                            delta = chunk.choices[0].delta
-                            if hasattr(delta, 'tool_calls') and delta.tool_calls:
-                                for tool_call_delta in delta.tool_calls:
-                                    if len(tool_calls_accumulated) <= tool_call_delta.index:
-                                        tool_calls_accumulated.extend([None] * (tool_call_delta.index + 1 - len(tool_calls_accumulated)))
-                                    if tool_calls_accumulated[tool_call_delta.index] is None:
-                                        tool_calls_accumulated[tool_call_delta.index] = {
-                                            "id": "",
-                                            "type": "",
-                                            "function": {"name": "", "arguments": ""}
-                                        }
-                                    if hasattr(tool_call_delta, 'id') and tool_call_delta.id:
-                                        tool_calls_accumulated[tool_call_delta.index]["id"] = tool_call_delta.id
-                                    if hasattr(tool_call_delta, 'type') and tool_call_delta.type:
-                                        tool_calls_accumulated[tool_call_delta.index]["type"] = tool_call_delta.type
-                                    if hasattr(tool_call_delta, 'function'):
-                                        if hasattr(tool_call_delta.function, 'name') and tool_call_delta.function.name:
-                                            tool_calls_accumulated[tool_call_delta.index]["function"]["name"] += tool_call_delta.function.name
-                                        if hasattr(tool_call_delta.function, 'arguments') and tool_call_delta.function.arguments:
-                                            tool_calls_accumulated[tool_call_delta.index]["function"]["arguments"] += tool_call_delta.function.arguments
-                            content = delta.content
-                            if content:
-                                full_res += content
-                                res_placeholder.markdown(full_res + "▌")
-                    res_placeholder.markdown(full_res)
-
-                    # Process accumulated tool calls
-                    if tool_calls_accumulated:
-                        for tool_call in tool_calls_accumulated:
-                            if tool_call:
-                                tool_name = tool_call["function"]["name"]
-                                tool_args = json.loads(tool_call["function"]["arguments"])
-                                tool_result = tool_executor.process_tool_call(tool_name, tool_args)
-
-                                # Add tool response to conversation
-                                messages.append({"role": "assistant", "content": f"使用工具 {tool_name}..."})
-                                messages.append({"role": "user", "content": f"工具結果: {tool_result}"})
-
-                        # Get final response
-                        final_response = client.chat.completions.create(
-                            model=model_name,
-                            messages=full_history + [
-                                {"role": "assistant", "content": f"使用工具 {tool_name}..."},
-                                {"role": "user", "content": f"工具結果: {tool_result}"}
-                            ],
-                            temperature=temperature,
-                            stream=use_streaming
-                        )
-                        if use_streaming:
-                            full_res = ""
-                            for chunk in final_response:
-                                if hasattr(chunk, 'choices') and chunk.choices and len(chunk.choices) > 0:
-                                    content = chunk.choices[0].delta.content
-                                    if content:
-                                        full_res += content
-                                        res_placeholder.markdown(full_res + "▌")
-                            res_placeholder.markdown(full_res)
-                        else:
-                            full_res = final_response.choices[0].message.content
-                            render_chat_content(full_res)
-                        response = final_response  # Update response for saving
-
-                elif use_tools and not use_streaming:
-                    if hasattr(response.choices[0].message, 'tool_calls') and response.choices[0].message.tool_calls:
-                        # Process tool calls
-                        tool_call = response.choices[0].message.tool_calls[0]
-                        tool_name = tool_call.function.name
-                        tool_args = json.loads(tool_call.function.arguments)
-
-                        tool_result = tool_executor.process_tool_call(tool_name, tool_args)
-
-                        # Add tool response to conversation
-                        messages.append({"role": "assistant", "content": f"使用工具 {tool_name}..."})
-                        messages.append({"role": "user", "content": f"工具結果: {tool_result}"})
-
-                        # Get final response
-                        final_response = client.chat.completions.create(
-                            model=model_name,
-                            messages=full_history + [
-                                {"role": "assistant", "content": f"使用工具 {tool_name}..."},
-                                {"role": "user", "content": f"工具結果: {tool_result}"}
-                            ],
-                            temperature=temperature,
-                            stream=use_streaming
-                        )
-                        response = final_response
-
-                # Display response
-                if not use_streaming:
-                    full_res = response.choices[0].message.content
+                    full_res = run_anthropic_mcp(
+                        full_history,
+                        model_name,
+                        current_key,
+                        temperature,
+                        use_tools,
+                    )
                     render_chat_content(full_res)
+                else:
+                    client = OpenAI(api_key=current_key, base_url=base_url)
+
+                    # Ensure model_name is valid for current API source
+                    if model_name not in model_options:
+                        model_name = model_options[0]
+                        st.warning(f"模型 {model_name} 在當前 API 中不可用，已切換至 {model_name}")
+
+                    # Prepare API call
+                    api_params = {
+                        "model": model_name,
+                        "messages": full_history,
+                        "temperature": temperature,
+                        "stream": use_streaming,
+                    }
+
+                    if use_tools:
+                        api_params["tools"] = get_tools_for_api()
+                        api_params["tool_choice"] = "auto"
+
+                    response = client.chat.completions.create(**api_params)
+
+                    # Handle tool calls
+                    tool_calls_accumulated = []
+                    if use_tools and use_streaming:
+                        # In streaming mode, accumulate tool calls
+                        for chunk in response:
+                            if hasattr(chunk, "choices") and chunk.choices and len(chunk.choices) > 0:
+                                delta = chunk.choices[0].delta
+                                if hasattr(delta, "tool_calls") and delta.tool_calls:
+                                    for tool_call_delta in delta.tool_calls:
+                                        if len(tool_calls_accumulated) <= tool_call_delta.index:
+                                            tool_calls_accumulated.extend([None] * (tool_call_delta.index + 1 - len(tool_calls_accumulated)))
+                                        if tool_calls_accumulated[tool_call_delta.index] is None:
+                                            tool_calls_accumulated[tool_call_delta.index] = {
+                                                "id": "",
+                                                "type": "",
+                                                "function": {"name": "", "arguments": ""},
+                                            }
+                                        if hasattr(tool_call_delta, "id") and tool_call_delta.id:
+                                            tool_calls_accumulated[tool_call_delta.index]["id"] = tool_call_delta.id
+                                        if hasattr(tool_call_delta, "type") and tool_call_delta.type:
+                                            tool_calls_accumulated[tool_call_delta.index]["type"] = tool_call_delta.type
+                                        if hasattr(tool_call_delta, "function"):
+                                            if hasattr(tool_call_delta.function, "name") and tool_call_delta.function.name:
+                                                tool_calls_accumulated[tool_call_delta.index]["function"]["name"] += tool_call_delta.function.name
+                                            if hasattr(tool_call_delta.function, "arguments") and tool_call_delta.function.arguments:
+                                                tool_calls_accumulated[tool_call_delta.index]["function"]["arguments"] += tool_call_delta.function.arguments
+                                content = delta.content
+                                if content:
+                                    full_res += content
+                                    res_placeholder.markdown(full_res + "▌")
+                        res_placeholder.markdown(full_res)
+
+                        # Process accumulated tool calls
+                        if tool_calls_accumulated:
+                            for tool_call in tool_calls_accumulated:
+                                if tool_call:
+                                    tool_name = tool_call["function"]["name"]
+                                    tool_args = json.loads(tool_call["function"]["arguments"])
+                                    tool_result = tool_executor.process_tool_call(tool_name, tool_args)
+
+                                    # Add tool response to conversation
+                                    messages.append({"role": "assistant", "content": f"使用工具 {tool_name}..."})
+                                    messages.append({"role": "user", "content": f"工具結果: {tool_result}"})
+
+                            # Get final response
+                            final_response = client.chat.completions.create(
+                                model=model_name,
+                                messages=full_history + [
+                                    {"role": "assistant", "content": f"使用工具 {tool_name}..."},
+                                    {"role": "user", "content": f"工具結果: {tool_result}"},
+                                ],
+                                temperature=temperature,
+                                stream=use_streaming,
+                            )
+                            if use_streaming:
+                                full_res = ""
+                                for chunk in final_response:
+                                    if hasattr(chunk, "choices") and chunk.choices and len(chunk.choices) > 0:
+                                        content = chunk.choices[0].delta.content
+                                        if content:
+                                            full_res += content
+                                            res_placeholder.markdown(full_res + "▌")
+                                res_placeholder.markdown(full_res)
+                            else:
+                                full_res = final_response.choices[0].message.content
+                                render_chat_content(full_res)
+                            response = final_response
+
+                    elif use_tools and not use_streaming:
+                        if hasattr(response.choices[0].message, "tool_calls") and response.choices[0].message.tool_calls:
+                            # Process tool calls
+                            tool_call = response.choices[0].message.tool_calls[0]
+                            tool_name = tool_call.function.name
+                            tool_args = json.loads(tool_call.function.arguments)
+
+                            tool_result = tool_executor.process_tool_call(tool_name, tool_args)
+
+                            # Add tool response to conversation
+                            messages.append({"role": "assistant", "content": f"使用工具 {tool_name}..."})
+                            messages.append({"role": "user", "content": f"工具結果: {tool_result}"})
+
+                            # Get final response
+                            final_response = client.chat.completions.create(
+                                model=model_name,
+                                messages=full_history + [
+                                    {"role": "assistant", "content": f"使用工具 {tool_name}..."},
+                                    {"role": "user", "content": f"工具結果: {tool_result}"},
+                                ],
+                                temperature=temperature,
+                                stream=use_streaming,
+                            )
+                            response = final_response
+
+                    # Display response
+                    if not use_streaming:
+                        full_res = response.choices[0].message.content
+                        render_chat_content(full_res)
 
                 # Save response
                 assistant_message = {"role": "assistant", "content": full_res}

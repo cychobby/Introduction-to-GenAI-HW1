@@ -3,7 +3,9 @@ openai
 python-dotenv
 Pillow
 ddgs
+requests
 RestrictedPython
 numpy
 scipy
 matplotlib
+anthropic[mcp]
