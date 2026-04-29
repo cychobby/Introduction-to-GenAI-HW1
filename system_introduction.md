@@ -64,5 +64,4 @@
 
 ---
 
-*此系統為作業二完整實現，展示了現代AI Agent的完整功能棧。*</content>
-<parameter name="filePath">/home/daddywu/Python區/GenAI_class/system_introduction.md
+*此系統為作業二完整實現，展示了現代AI Agent的完整功能棧。*

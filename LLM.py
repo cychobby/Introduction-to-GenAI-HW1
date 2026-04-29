@@ -14,6 +14,27 @@ from multimodal import ImageProcessor
 from tools import ToolExecutor, get_tools_for_api
 from utilities import SessionAnalytics, SessionManager
 
+# Helper to render chat content with code blocks as proper code components
+import re
+
+def render_chat_content(content):
+    if isinstance(content, str):
+        # Render markdown text and code fences with Streamlit code blocks to ensure copy works.
+        parts = re.split(r"```(\w*)\n", content)
+        if len(parts) > 1:
+            for i in range(0, len(parts), 2):
+                text_part = parts[i].strip()
+                if text_part:
+                    st.markdown(text_part)
+                if i + 1 < len(parts):
+                    lang = parts[i + 1].strip() or None
+                    code_part = parts[i + 2].rstrip("\n") if i + 2 < len(parts) else ""
+                    st.code(code_part, language=lang)
+        else:
+            st.markdown(content)
+    else:
+        st.markdown(content)
+
 # 載入環境變數
 load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
@@ -136,6 +157,7 @@ else:
 
     # Process messages: filter fields and parse JSON content
     messages = []
+    api_source_lower = api_source.lower().replace(" nim", "")
     for msg in raw_messages:
         content = msg["content"]
         # Try to parse JSON content for multimodal messages
@@ -144,6 +166,11 @@ else:
             content = parsed_content
         except (json.JSONDecodeError, TypeError):
             pass  # Keep as string if not JSON
+
+        # If content is multimodal but current model doesn't support vision, convert to text
+        if isinstance(content, list) and not model_router.is_vision_supported(model_name, api_source_lower):
+            text_parts = [item.get("text", "") for item in content if item.get("type") == "text"]
+            content = " ".join(text_parts) + " [圖片已省略，因為當前模型不支援視覺]"
 
         messages.append({
             "role": msg["role"],
@@ -156,11 +183,11 @@ else:
             if isinstance(msg["content"], list):  # 處理多模態顯示
                 for item in msg["content"]:
                     if item["type"] == "text":
-                        st.write(item["text"])
+                        render_chat_content(item["text"])
                     elif item["type"] == "image_url":
                         st.image(item["image_url"]["url"])
             else:
-                st.markdown(msg["content"])
+                render_chat_content(msg["content"])
 
     # 撤回功能
     if len(messages) >= 2:
@@ -248,15 +275,16 @@ else:
         else:
             message = {"role": "user", "content": prompt}
 
-        # Add to messages
+        # Add to messages and persist state
+        current_chat["messages"].append(message)
         messages.append(message)
         with st.chat_message("user"):
             if isinstance(message["content"], str):
-                st.markdown(message["content"])
+                render_chat_content(message["content"])
             else:
                 for content_item in message["content"]:
                     if content_item["type"] == "text":
-                        st.markdown(content_item["text"])
+                        render_chat_content(content_item["text"])
                     elif content_item["type"] == "image_url":
                         st.image(content_item["image_url"]["url"])
 
@@ -286,18 +314,81 @@ else:
                     "stream": use_streaming
                 }
 
-                send_tools = use_tools and not use_streaming
-                if use_tools and use_streaming:
-                    st.warning("目前串流模式下不支援工具呼叫，已停用本次工具功能。")
-
-                if send_tools:
+                if use_tools:
                     api_params["tools"] = get_tools_for_api()
                     api_params["tool_choice"] = "auto"
 
                 response = client.chat.completions.create(**api_params)
 
                 # Handle tool calls
-                if use_tools and not use_streaming:
+                tool_calls_accumulated = []
+                if use_tools and use_streaming:
+                    # In streaming mode, accumulate tool calls
+                    for chunk in response:
+                        if hasattr(chunk, 'choices') and chunk.choices and len(chunk.choices) > 0:
+                            delta = chunk.choices[0].delta
+                            if hasattr(delta, 'tool_calls') and delta.tool_calls:
+                                for tool_call_delta in delta.tool_calls:
+                                    if len(tool_calls_accumulated) <= tool_call_delta.index:
+                                        tool_calls_accumulated.extend([None] * (tool_call_delta.index + 1 - len(tool_calls_accumulated)))
+                                    if tool_calls_accumulated[tool_call_delta.index] is None:
+                                        tool_calls_accumulated[tool_call_delta.index] = {
+                                            "id": "",
+                                            "type": "",
+                                            "function": {"name": "", "arguments": ""}
+                                        }
+                                    if hasattr(tool_call_delta, 'id') and tool_call_delta.id:
+                                        tool_calls_accumulated[tool_call_delta.index]["id"] = tool_call_delta.id
+                                    if hasattr(tool_call_delta, 'type') and tool_call_delta.type:
+                                        tool_calls_accumulated[tool_call_delta.index]["type"] = tool_call_delta.type
+                                    if hasattr(tool_call_delta, 'function'):
+                                        if hasattr(tool_call_delta.function, 'name') and tool_call_delta.function.name:
+                                            tool_calls_accumulated[tool_call_delta.index]["function"]["name"] += tool_call_delta.function.name
+                                        if hasattr(tool_call_delta.function, 'arguments') and tool_call_delta.function.arguments:
+                                            tool_calls_accumulated[tool_call_delta.index]["function"]["arguments"] += tool_call_delta.function.arguments
+                            content = delta.content
+                            if content:
+                                full_res += content
+                                res_placeholder.markdown(full_res + "▌")
+                    res_placeholder.markdown(full_res)
+
+                    # Process accumulated tool calls
+                    if tool_calls_accumulated:
+                        for tool_call in tool_calls_accumulated:
+                            if tool_call:
+                                tool_name = tool_call["function"]["name"]
+                                tool_args = json.loads(tool_call["function"]["arguments"])
+                                tool_result = tool_executor.process_tool_call(tool_name, tool_args)
+
+                                # Add tool response to conversation
+                                messages.append({"role": "assistant", "content": f"使用工具 {tool_name}..."})
+                                messages.append({"role": "user", "content": f"工具結果: {tool_result}"})
+
+                        # Get final response
+                        final_response = client.chat.completions.create(
+                            model=model_name,
+                            messages=full_history + [
+                                {"role": "assistant", "content": f"使用工具 {tool_name}..."},
+                                {"role": "user", "content": f"工具結果: {tool_result}"}
+                            ],
+                            temperature=temperature,
+                            stream=use_streaming
+                        )
+                        if use_streaming:
+                            full_res = ""
+                            for chunk in final_response:
+                                if hasattr(chunk, 'choices') and chunk.choices and len(chunk.choices) > 0:
+                                    content = chunk.choices[0].delta.content
+                                    if content:
+                                        full_res += content
+                                        res_placeholder.markdown(full_res + "▌")
+                            res_placeholder.markdown(full_res)
+                        else:
+                            full_res = final_response.choices[0].message.content
+                            render_chat_content(full_res)
+                        response = final_response  # Update response for saving
+
+                elif use_tools and not use_streaming:
                     if hasattr(response.choices[0].message, 'tool_calls') and response.choices[0].message.tool_calls:
                         # Process tool calls
                         tool_call = response.choices[0].message.tool_calls[0]
@@ -323,20 +414,14 @@ else:
                         response = final_response
 
                 # Display response
-                if use_streaming:
-                    for chunk in response:
-                        if hasattr(chunk, 'choices') and chunk.choices and len(chunk.choices) > 0:
-                            content = chunk.choices[0].delta.content
-                            if content:
-                                full_res += content
-                                res_placeholder.markdown(full_res + "▌")
-                    res_placeholder.markdown(full_res)
-                else:
+                if not use_streaming:
                     full_res = response.choices[0].message.content
-                    st.markdown(full_res)
+                    render_chat_content(full_res)
 
                 # Save response
-                messages.append({"role": "assistant", "content": full_res})
+                assistant_message = {"role": "assistant", "content": full_res}
+                messages.append(assistant_message)
+                current_chat["messages"].append(assistant_message)
 
                 # Save to database
                 db_manager.save_session(cid, current_chat["name"], model_name, api_source)
