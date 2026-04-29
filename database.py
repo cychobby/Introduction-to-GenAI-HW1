@@ -193,5 +193,4 @@ class PersistenceManager:
             return {
                 "total_messages": total_messages,
                 "total_tokens": total_tokens
-            }#</content>
-#<parameter name="filePath">/home/daddywu/Python區/GenAI_class/database.py
+            }

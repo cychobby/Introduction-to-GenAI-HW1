@@ -124,7 +124,7 @@ with st.sidebar:
 
     use_streaming = st.checkbox("開啟串流輸出 (Streaming)", value=True)
     use_tools = st.checkbox("啟用工具調用 (Tools)", value=True)
-    system_prompt = st.text_area("System Prompt", value="你是一個專業助理，可以使用各種工具來幫助用戶。")
+    system_prompt = st.text_area("System Prompt", value="你是一個專業助理，可以使用各種工具來幫助用戶。當用戶要求搜尋資訊、執行計算、運行程式碼或操作檔案時，請積極使用相應的工具來提供準確的答案。")
     temperature = st.slider("Temperature (隨機性)", 0.0, 2.0, 0.7)
 
     st.divider()

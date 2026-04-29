@@ -166,5 +166,4 @@ def create_requirements_file():
     with open("requirements.txt", "w") as f:
         f.write("\n".join(requirements))
 
-    return "requirements.txt created" #</content>
-#<parameter name="filePath">/home/daddywu/Python區/GenAI_class/utilities.py
+    return "requirements.txt created"

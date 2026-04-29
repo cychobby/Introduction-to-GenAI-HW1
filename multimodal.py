@@ -83,5 +83,4 @@ class ImageProcessor:
                 "filename": file.name
             }
         except Exception as e:
-            return {"error": str(e)}#</content>
-#<parameter name="filePath">/home/daddywu/Python區/GenAI_class/multimodal.py
+            return {"error": str(e)}

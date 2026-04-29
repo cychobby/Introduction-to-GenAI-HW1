@@ -92,5 +92,4 @@ class ModelRouter:
     def is_vision_supported(self, model_name: str, api_source: str) -> bool:
         """Check if a model supports vision"""
         model_info = self.models.get(api_source, {}).get(model_name, {})
-        return model_info.get("vision", False)#</content>
-#<parameter name="filePath">/home/daddywu/Python區/GenAI_class/model_router.py
+        return model_info.get("vision", False)

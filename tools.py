@@ -2,8 +2,8 @@ import json
 import os
 import subprocess
 import sys
-from typing import Dict, Any, List
-from duckduckgo_search import DDGS
+from typing import Dict, Any, List, Union
+from ddgs import DDGS
 
 # Tool definitions for OpenAI function calling
 TOOLS = [
@@ -50,18 +50,18 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "execute_code",
-            "description": "Execute Python code in a safe environment and return the output",
+            "description": "Execute Python code in a safe environment and return the output. Use numpy and scipy for scientific computing when needed.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "code": {
                         "type": "string",
-                        "description": "Python code to execute"
+                        "description": "Python code to execute. You can use numpy (np), scipy (sp), and matplotlib (plt) for numerical and scientific computing."
                     },
                     "timeout": {
-                        "type": "integer",
-                        "description": "Execution timeout in seconds (default: 10)",
-                        "default": 10
+                        "type": ["integer", "string"],
+                        "description": "Execution timeout in seconds (default: 30). Can be an integer or string.",
+                        "default": 30
                     }
                 },
                 "required": ["code"]
@@ -134,9 +134,13 @@ class ToolExecutor:
         except Exception as e:
             return f"Error calculating '{expression}': {str(e)}"
 
-    def web_search(self, query: str, max_results: int = 3) -> str:
+    def web_search(self, query: str, max_results: Union[int, str] = 3) -> str:
         """Web search using DuckDuckGo"""
         try:
+            # Convert max_results to int if it's a string
+            if isinstance(max_results, str):
+                max_results = int(max_results)
+            
             with DDGS() as ddgs:
                 results = list(ddgs.text(query, max_results=max_results))
                 if not results:
@@ -150,14 +154,28 @@ class ToolExecutor:
 
                 return output
         except Exception as e:
-            return f"Error searching web: {str(e)}"
+            return f"Error searching web for '{query}': {str(e)}. The system may not have internet access or the search service is unavailable."
 
-    def execute_code(self, code: str, timeout: int = 10) -> str:
-        """Execute Python code safely"""
+    def execute_code(self, code: str, timeout: Union[int, str] = 30) -> str:
+        """Execute Python code safely with scientific libraries"""
         try:
+            # Convert timeout to int if it's a string
+            if isinstance(timeout, str):
+                timeout = int(timeout)
+            
+            # Prepend imports for scientific computing
+            enhanced_code = """
+import numpy as np
+import scipy as sp
+from scipy import integrate, optimize, signal
+import matplotlib.pyplot as plt
+import math
+
+""" + code
+            
             # Use subprocess with timeout for safety
             result = subprocess.run(
-                [sys.executable, "-c", code],
+                [sys.executable, "-c", enhanced_code],
                 capture_output=True,
                 text=True,
                 timeout=timeout,
@@ -166,9 +184,9 @@ class ToolExecutor:
 
             output = ""
             if result.stdout:
-                output += f"Output:\n{result.stdout}"
+                output += f"{result.stdout}"
             if result.stderr:
-                output += f"Errors:\n{result.stderr}"
+                output += f"Errors/Warnings:\n{result.stderr}"
 
             return output or "Code executed successfully (no output)"
         except subprocess.TimeoutExpired:
@@ -222,5 +240,4 @@ class ToolExecutor:
 
 def get_tools_for_api() -> List[Dict]:
     """Return tools list for API calls"""
-    return TOOLS #</content>
-#<parameter name="filePath">/home/daddywu/Python區/GenAI_class/tools.py
+    return TOOLS
